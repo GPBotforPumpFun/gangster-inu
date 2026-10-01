@@ -18,48 +18,81 @@ function json(res,status,obj,cache='no-store'){res.writeHead(status,{'content-ty
 function body(req){return new Promise((resolve,reject)=>{let d='';req.on('data',c=>{d+=c;if(d.length>100000)req.destroy()});req.on('end',()=>{try{resolve(d?JSON.parse(d):{})}catch(e){reject(e)}});req.on('error',reject)})}
 function normalize(p){return{symbol:p.baseToken?.symbol||'?',name:p.baseToken?.name||'Unknown',address:p.baseToken?.address||'',pairAddress:p.pairAddress||'',quote:p.quoteToken?.symbol||'',priceUsd:n(p.priceUsd),change5m:n(p.priceChange?.m5),change1h:n(p.priceChange?.h1),liquidityUsd:n(p.liquidity?.usd),volume5m:n(p.volume?.m5),volume1h:n(p.volume?.h1),buys5m:n(p.txns?.m5?.buys),sells5m:n(p.txns?.m5?.sells),buys1h:n(p.txns?.h1?.buys),sells1h:n(p.txns?.h1?.sells),pairCreatedAt:p.pairCreatedAt||null,dexId:p.dexId||'',url:p.url||'',heliusVerified:false}}
 async function dex(url){const r=await fetch(url,{headers});if(!r.ok)throw new Error('DexScreener '+r.status);return r.json()}
+async function pumpLatest(){
+  const url='https://frontend-api-v3.pump.fun/coins?offset=0&limit=60&sort=created_timestamp&order=DESC&includeNsfw=false';
+  const r=await fetch(url,{headers:{accept:'application/json','user-agent':'GangsterInu/5.0'}});
+  if(!r.ok)throw new Error('Pump.fun '+r.status);
+  const j=await r.json();
+  return Array.isArray(j)?j:(Array.isArray(j.coins)?j.coins:(Array.isArray(j.data)?j.data:[]));
+}
 async function helius(method,params){if(!HELIUS_KEY)throw new Error('not configured');const r=await fetch('https://mainnet.helius-rpc.com/?api-key='+encodeURIComponent(HELIUS_KEY),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:'ginu',method,params})});if(!r.ok)throw new Error('Helius '+r.status);const j=await r.json();if(j.error)throw new Error(j.error.message||'Helius error');return j.result}
 async function verify(items){if(!HELIUS_KEY||!items.length)return items;try{const a=await helius('getAssetBatch',{ids:items.map(x=>x.address)});const valid=new Set((a||[]).filter(Boolean).map(x=>x.id));return items.map(x=>({...x,heliusVerified:valid.has(x.address)}))}catch(e){return items}}
 async function chainPulse(pairAddress){if(!HELIUS_KEY||!pairAddress)return{configured:!!HELIUS_KEY,sig2m:0,sig5m:0,latest:null};try{const sigs=await helius('getSignaturesForAddress',[pairAddress,{limit:40}]);const now=Math.floor(Date.now()/1000),rows=(sigs||[]).filter(x=>x.blockTime);return{configured:true,sig2m:rows.filter(x=>now-x.blockTime<=120).length,sig5m:rows.filter(x=>now-x.blockTime<=300).length,latest:rows[0]?.blockTime||null}}catch(e){return{configured:true,sig2m:0,sig5m:0,latest:null,error:true}}}
 
 async function intel(){
-  if(intelCache.data&&Date.now()-intelCache.time<20000)return intelCache.data;
-  const addresses=[];
-  try{
-    const [profiles,boosts]=await Promise.all([
-      dex('https://api.dexscreener.com/token-profiles/latest/v1').catch(()=>[]),
-      dex('https://api.dexscreener.com/token-boosts/latest/v1').catch(()=>[])
-    ]);
-    for(const x of [...(Array.isArray(profiles)?profiles:[]),...(Array.isArray(boosts)?boosts:[])]){
-      if(x.chainId==='solana'&&x.tokenAddress&&!addresses.includes(x.tokenAddress))addresses.push(x.tokenAddress);
-      if(addresses.length>=28)break;
-    }
-  }catch(e){}
+  if(intelCache.data&&Date.now()-intelCache.time<10000)return intelCache.data;
+  let launchRows=[],source='Pump.fun newest launches';
+  try{launchRows=await pumpLatest()}catch(e){source='DexScreener fallback'}
+  const launchMap=new Map();
+  const mints=[];
+  for(const c of launchRows){
+    const mint=String(c.mint||c.address||'');
+    if(!mint||launchMap.has(mint))continue;
+    const created=Number(c.created_timestamp||c.createdAt||0);
+    launchMap.set(mint,{
+      launchCreatedAt:created,
+      lastTradeAt:Number(c.last_trade_timestamp||0),
+      pumpComplete:!!c.complete,
+      pumpMarketCap:n(c.usd_market_cap||c.market_cap||0),
+      pumpName:c.name||'',
+      pumpSymbol:c.symbol||''
+    });
+    mints.push(mint);
+    if(mints.length>=36)break;
+  }
+
   let pairs=[];
-  if(addresses.length){
-    const found=await Promise.all(addresses.slice(0,24).map(a=>dex('https://api.dexscreener.com/token-pairs/v1/solana/'+encodeURIComponent(a)).catch(()=>[])));
+  if(mints.length){
+    const found=await Promise.all(mints.map(m=>dex('https://api.dexscreener.com/token-pairs/v1/solana/'+encodeURIComponent(m)).catch(()=>[])));
     for(const arr of found)if(Array.isArray(arr))pairs.push(...arr);
   }
-  if(pairs.length<8){
-    const searches=await Promise.all(['pump','pumpfun','solana meme'].map(q=>dex('https://api.dexscreener.com/latest/dex/search?q='+encodeURIComponent(q)).catch(()=>({pairs:[]}))));
+
+  if(!pairs.length){
+    const searches=await Promise.all(['pump','pumpfun'].map(q=>dex('https://api.dexscreener.com/latest/dex/search?q='+encodeURIComponent(q)).catch(()=>({pairs:[]}))));
     for(const j of searches)pairs.push(...(j.pairs||[]));
   }
-  const seen=new Set(),out=[];
+
+  const byMint=new Map();
   for(const p of pairs){
     if(p.chainId!=='solana')continue;
-    const a=p.baseToken?.address;
-    if(!a||seen.has(a)||!n(p.priceUsd)||n(p.liquidity?.usd)<1000)continue;
-    seen.add(a);
+    const mint=p.baseToken?.address;
+    if(!mint||!n(p.priceUsd))continue;
+    const current=byMint.get(mint);
+    if(!current||n(p.liquidity?.usd)>n(current.liquidity?.usd))byMint.set(mint,p);
+  }
+
+  const out=[];
+  for(const [mint,p] of byMint){
     const x=normalize(p);
-    x.pumpOrigin=/pump/i.test(p.dexId||'')||/pump$/i.test(a)||/pump/i.test(p.url||'');
+    const launch=launchMap.get(mint)||{};
+    Object.assign(x,launch);
+    x.pumpOrigin=launchMap.has(mint)||/pump/i.test(p.dexId||'')||/pump$/i.test(mint)||/pump/i.test(p.url||'');
+    if(!x.launchCreatedAt)x.launchCreatedAt=x.pairCreatedAt||0;
+    if(n(x.liquidityUsd)<500)continue;
     out.push(x);
   }
-  out.sort((a,b)=>(Number(b.pumpOrigin)-Number(a.pumpOrigin))+((b.volume5m+b.volume1h*.12)-(a.volume5m+a.volume1h*.12))/1000000);
-  const top=await verify(out.slice(0,24));
-  intelCache={time:Date.now(),data:{source:'DexScreener + Helius',heliusConfigured:!!HELIUS_KEY,updatedAt:Date.now(),pairs:top}};
+
+  out.sort((a,b)=>(b.launchCreatedAt||0)-(a.launchCreatedAt||0));
+  const top=await verify(out.slice(0,30));
+  intelCache={time:Date.now(),data:{
+    source:source+' + DexScreener + Helius',
+    heliusConfigured:!!HELIUS_KEY,
+    updatedAt:Date.now(),
+    newestLaunchAt:top[0]?.launchCreatedAt||null,
+    pairs:top
+  }};
   return intelCache.data
 }
-
 async function token(address){
   const j=await dex('https://api.dexscreener.com/token-pairs/v1/solana/'+encodeURIComponent(address));
   const pairs=(Array.isArray(j)?j:[]).filter(p=>p.chainId==='solana'&&n(p.priceUsd));

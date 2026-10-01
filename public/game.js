@@ -77,12 +77,13 @@ function modeRows(){
   const fresh=intel.filter(x=>!x.launchCreatedAt||now-x.launchCreatedAt<6*60*60*1000);
   const pool=fresh.length>=4?fresh:intel;
   if(mode==='street')return [...pool].sort((a,b)=>(b.launchCreatedAt||0)-(a.launchCreatedAt||0));
-  if(mode==='wire')return [...pool].sort((a,b)=>((b.buys5m+b.sells5m)-(a.buys5m+a.sells5m)));
+  if(mode==='wire')return [...pool].sort((a,b)=>(Number(b.chainActivity5m||0)-Number(a.chainActivity5m||0))||((b.buys5m+b.sells5m)-(a.buys5m+a.sells5m)));
   if(mode==='collections'){
     const pressure=pool.filter(x=>x.change5m<0);
-    return (pressure.length>=3?pressure:[...pool]).sort((a,b)=>a.change5m-b.change5m);
+    if(pressure.length>=3)return pressure.sort((a,b)=>a.change5m-b.change5m);
+    return [...pool].sort((a,b)=>(Number(a.chainActivity5m||0)-Number(b.chainActivity5m||0))||((a.launchCreatedAt||0)-(b.launchCreatedAt||0)));
   }
-  if(mode==='bigmoney')return [...pool].sort((a,b)=>b.liquidityUsd-a.liquidityUsd);
+  if(mode==='bigmoney')return [...pool].sort((a,b)=>(Number(b.pumpMarketCap||b.liquidityUsd||0)-Number(a.pumpMarketCap||a.liquidityUsd||0)));
   return pool;
 }
 
@@ -92,8 +93,8 @@ function renderJobs(){
   $('jobs').innerHTML=rows.map(x=>
     '<article class="job-card '+(selected&&selected.address===x.address?'selected':'')+'" data-address="'+esc(x.address)+'">'+
       '<div class="job-top"><div class="job-token"><strong>$'+esc(x.symbol)+'</strong><small>'+esc(x.name)+'</small></div><span class="heat">HEAT '+Math.min(99,Math.round(25+Math.abs(x.change5m)*2+(x.buys5m+x.sells5m)/8))+'</span></div>'+
-      '<div class="job-metrics"><div class="jm"><b class="'+(x.change5m>=0?'up':'down')+'">'+Number(x.change5m).toFixed(1)+'%</b><small>5m move</small></div><div class="jm"><b>'+money(x.volume5m)+'</b><small>5m volume</small></div><div class="jm"><b>'+money(x.liquidityUsd)+'</b><small>liquidity</small></div></div>'+
-      '<div class="badges"><span class="badge ok">PUMP.FUN</span>'+(x.heliusVerified?'<span class="badge ok">Helius verified</span>':'')+'<span class="badge">LAUNCHED '+age(x.launchCreatedAt||x.pairCreatedAt)+' AGO</span><span class="badge">'+esc(x.dexId)+'</span></div>'+
+      '<div class="job-metrics"><div class="jm"><b class="'+(x.change5m>=0?'up':'down')+'">'+(x.sourceType==='bonding-curve'?money(x.pumpMarketCap||0):Number(x.change5m).toFixed(1)+'%')+'</b><small>'+(x.sourceType==='bonding-curve'?'market cap':'5m move')+'</small></div><div class="jm"><b>'+(x.sourceType==='bonding-curve'?Number(x.chainActivity5m||0):money(x.volume5m))+'</b><small>'+(x.sourceType==='bonding-curve'?'chain tx · 5m':'5m volume')+'</small></div><div class="jm"><b>'+money(x.liquidityUsd)+'</b><small>'+(x.sourceType==='bonding-curve'?'curve SOL':'liquidity')+'</small></div></div>'+
+      '<div class="badges"><span class="badge ok">PUMP.FUN LIVE</span>'+(x.heliusVerified?'<span class="badge ok">HELIUS VERIFIED</span>':'')+'<span class="badge">LAUNCHED '+age(x.launchCreatedAt||x.pairCreatedAt)+' AGO</span><span class="badge">'+(x.sourceType==='bonding-curve'?'BONDING CURVE':esc(x.dexId))+'</span></div>'+
       '<div class="select-cue"><span>'+(selected&&selected.address===x.address?'JOB SELECTED':'SELECT THIS JOB')+'</span><span>→</span></div>'+
     '</article>'
   ).join('');

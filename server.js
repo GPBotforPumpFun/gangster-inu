@@ -59,37 +59,72 @@ async function curveSnapshot(curve,usd){
 }
 async function latestPumpLaunches(){
   if(!HELIUS_KEY)return[];
-  const sigs=await helius('getSignaturesForAddress',[PUMP_PROGRAM,{limit:80,commitment:'confirmed'}]).catch(()=>[]);
-  const txs=await Promise.all((sigs||[]).slice(0,55).map(x=>helius('getTransaction',[x.signature,{encoding:'jsonParsed',maxSupportedTransactionVersion:0,commitment:'confirmed'}]).catch(()=>null)));
-  const launches=[];
-  for(let k=0;k<txs.length;k++){
-    const tx=txs[k];if(!tx?.transaction?.message)continue;
-    const logs=tx.meta?.logMessages||[];
-    if(!logs.some(v=>/Instruction: Create(?:V2)?\b/i.test(v)))continue;
-    const ins=(tx.transaction.message.instructions||[]).find(i=>i.programId===PUMP_PROGRAM&&Array.isArray(i.accounts)&&i.accounts.length>=3);
-    if(!ins)continue;
-    const mint=String(ins.accounts[0]),curve=String(ins.accounts[2]);
-    if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint))continue;
-    launches.push({address:mint,bondingCurve:curve,launchCreatedAt:(tx.blockTime||sigs[k]?.blockTime||0)*1000,signature:sigs[k]?.signature||'',pumpOrigin:true});
-    if(launches.length>=24)break;
+  const launches=[],seen=new Set();
+  let before=null,pages=0;
+  while(launches.length<18&&pages<5){
+    const cfg={limit:100,commitment:'confirmed'};
+    if(before)cfg.before=before;
+    const sigs=await helius('getSignaturesForAddress',[PUMP_PROGRAM,cfg]).catch(()=>[]);
+    if(!sigs.length)break;
+    before=sigs[sigs.length-1].signature;
+    // inspect in parallel, but cap each page to protect RPC usage
+    const txs=await Promise.all(sigs.map(x=>helius('getTransaction',[x.signature,{encoding:'jsonParsed',maxSupportedTransactionVersion:0,commitment:'confirmed'}]).catch(()=>null)));
+    for(let k=0;k<txs.length;k++){
+      const tx=txs[k];
+      if(!tx?.transaction?.message)continue;
+      const logs=tx.meta?.logMessages||[];
+      if(!logs.some(v=>/Instruction:\s*Create(?:V2)?\b/i.test(v)))continue;
+      const instructions=tx.transaction.message.instructions||[];
+      const ins=instructions.find(i=>{
+        const pid=typeof i.programId==='string'?i.programId:(i.programId?.toString?.()||'');
+        return pid===PUMP_PROGRAM&&Array.isArray(i.accounts)&&i.accounts.length>=3;
+      });
+      if(!ins)continue;
+      const mint=String(ins.accounts[0]),curve=String(ins.accounts[2]);
+      if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)||seen.has(mint))continue;
+      seen.add(mint);
+      launches.push({address:mint,bondingCurve:curve,launchCreatedAt:(tx.blockTime||sigs[k]?.blockTime||0)*1000,signature:sigs[k]?.signature||'',pumpOrigin:true,sourceType:'bonding-curve'});
+      if(launches.length>=18)break;
+    }
+    pages++;
   }
   return launches;
 }
-async function chainPulse(pairAddress){if(!HELIUS_KEY||!pairAddress)return{configured:!!HELIUS_KEY,sig2m:0,sig5m:0,latest:null};try{const sigs=await helius('getSignaturesForAddress',[pairAddress,{limit:40}]);const now=Math.floor(Date.now()/1000),rows=(sigs||[]).filter(x=>x.blockTime);return{configured:true,sig2m:rows.filter(x=>now-x.blockTime<=120).length,sig5m:rows.filter(x=>now-x.blockTime<=300).length,latest:rows[0]?.blockTime||null}}catch(e){return{configured:true,sig2m:0,sig5m:0,latest:null,error:true}}}
 
+async function activePumpFallback(limit=18){
+  const searches=await Promise.all(['pump','pump.fun','pumpfun'].map(q=>dex('https://api.dexscreener.com/latest/dex/search?q='+encodeURIComponent(q)).catch(()=>({pairs:[]}))));
+  const all=[];for(const j of searches)all.push(...(j.pairs||[]));
+  const seen=new Set(),out=[];
+  for(const p of all){
+    if(p.chainId!=='solana')continue;
+    const mint=p.baseToken?.address;
+    if(!mint||seen.has(mint)||!n(p.priceUsd))continue;
+    const pumpish=/pump/i.test(p.dexId||'')||/pump$/i.test(mint)||/pump/i.test(p.url||'');
+    if(!pumpish)continue;
+    seen.add(mint);
+    const x=normalize(p);
+    x.pumpOrigin=true;
+    x.sourceType='active-dex';
+    x.launchCreatedAt=p.pairCreatedAt||0;
+    out.push(x);
+  }
+  out.sort((x,y)=>(y.volume5m+y.volume1h*.1)-(x.volume5m+x.volume1h*.1));
+  return out.slice(0,limit);
+}
 async function intel(){
   if(intelCache.data&&Date.now()-intelCache.time<10000)return intelCache.data;
   const usd=await solUsd();
   let launches=[];
   try{launches=await latestPumpLaunches()}catch(e){}
   const rows=[];
+
   for(const l of launches){
     const [curve,pairs,sigs]=await Promise.all([
       curveSnapshot(l.bondingCurve,usd),
       dex('https://api.dexscreener.com/token-pairs/v1/solana/'+encodeURIComponent(l.address)).catch(()=>[]),
       helius('getSignaturesForAddress',[l.bondingCurve,{limit:30,commitment:'confirmed'}]).catch(()=>[])
     ]);
-    const best=(Array.isArray(pairs)?pairs:[]).filter(p=>p.chainId==='solana'&&n(p.priceUsd)).sort((a,b)=>n(b.liquidity?.usd)-n(a.liquidity?.usd))[0];
+    const best=(Array.isArray(pairs)?pairs:[]).filter(p=>p.chainId==='solana'&&n(p.priceUsd)).sort((x,y)=>n(y.liquidity?.usd)-n(x.liquidity?.usd))[0];
     let x=best?normalize(best):{
       symbol:'?',name:'New Pump Launch',address:l.address,pairAddress:l.bondingCurve,quote:'SOL',
       priceUsd:n(curve?.priceUsd),change5m:0,change1h:0,liquidityUsd:n(curve?.curveLiquidityUsd),
@@ -103,17 +138,30 @@ async function intel(){
       pumpMarketCap:n(curve?.marketCap)||n(x.marketCap),
       chainActivity2m:recent.filter(z=>now-z.blockTime<=120).length,
       chainActivity5m:recent.filter(z=>now-z.blockTime<=300).length,
-      sourceType:best?'dex':'bonding-curve'
+      sourceType:best?'fresh-dex':'bonding-curve'
     });
-    rows.push(x);
+    if(x.priceUsd||x.chainActivity5m>0)rows.push(x);
   }
-  let top=await verify(rows);
-  top.sort((a,b)=>(b.launchCreatedAt||0)-(a.launchCreatedAt||0));
+
+  if(rows.length<10){
+    const fallback=await activePumpFallback(18);
+    const have=new Set(rows.map(x=>x.address));
+    for(const x of fallback)if(!have.has(x.address)){rows.push(x);have.add(x.address)}
+  }
+
+  let top=await verify(rows.slice(0,24));
+  top.sort((x,y)=>{
+    const xf=/^(bonding-curve|fresh-dex)$/.test(x.sourceType)?1:0;
+    const yf=/^(bonding-curve|fresh-dex)$/.test(y.sourceType)?1:0;
+    return (yf-xf)||((y.launchCreatedAt||0)-(x.launchCreatedAt||0))||((y.volume5m||0)-(x.volume5m||0));
+  });
+
   intelCache={time:Date.now(),data:{
-    source:'Helius Pump.fun program + bonding curve + DexScreener',
+    source:'Helius Pump launch scanner + active Pump fallback + DexScreener',
     heliusConfigured:!!HELIUS_KEY,
     updatedAt:Date.now(),
     newestLaunchAt:top[0]?.launchCreatedAt||null,
+    freshLaunchCount:top.filter(x=>/^(bonding-curve|fresh-dex)$/.test(x.sourceType)).length,
     pairs:top
   }};
   return intelCache.data

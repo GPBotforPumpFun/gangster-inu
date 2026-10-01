@@ -283,57 +283,53 @@ const server=http.createServer(async(req,res)=>{try{
 
   if(u.pathname==='/api/job'&&req.method==='POST'){
     try{
-      const b=await body(req),address=String(b.address||'').trim();
+      const b=await body(req);
+      const address=String(b.address||'').trim();
       if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address))return json(res,400,{error:'invalid token'});
+
       let entry=null;
       const cached=(intelCache.data?.pairs||[]).find(x=>x.address===address);
       if(cached)entry={...cached};
-      try{const fresh=await token(address);if(fresh)entry={...entry,...fresh}}catch(e){console.error('job token refresh failed',address,e.message)}
+
+      try{
+        const fresh=await token(address);
+        if(fresh)entry={...(entry||{}),...fresh};
+      }catch(e){
+        console.error('job token refresh failed',address,e.message);
+      }
+
       if(!entry)return json(res,404,{error:'token not found'});
+
       let entryChain={configured:!!HELIUS_KEY,sig2m:0,sig5m:0,latest:null};
-      try{entryChain=await chainPulse(entry.pairAddress||entry.bondingCurve)}catch(e){console.error('job chain pulse failed',address,e.message)}
+      try{
+        entryChain=await chainPulse(entry.pairAddress||entry.bondingCurve);
+      }catch(e){
+        console.error('job chain pulse failed',address,e.message);
+      }
+
       const id=crypto.randomBytes(6).toString('hex');
-      const j={id,playerId:String(b.playerId||'anon').slice(0,64),alias:String(b.alias||'Anonymous Capo').slice(0,24),symbol:entry.symbol||'?',name:entry.name||'Pump Launch',address,crew:String(b.crew||'ginu'),mode:String(b.mode||'street'),start:Date.now(),end:Date.now()+JOB_MS,status:'active',entry,last:{...entry},prev:{...entry},entryChain,lastChain:entryChain,events:[],action:null};
-      addEvent(j,'start','Job locked',j.alias+' sent '+j.crew+' after 
+      const j={
+        id,
+        playerId:String(b.playerId||'anon').slice(0,64),
+        alias:String(b.alias||'Anonymous Capo').slice(0,24),
+        symbol:entry.symbol||'?',
+        name:entry.name||'Pump Launch',
+        address,
+        crew:String(b.crew||'ginu'),
+        mode:String(b.mode||'street'),
+        start:Date.now(),
+        end:Date.now()+JOB_MS,
+        status:'active',
+        entry:{...entry},
+        last:{...entry},
+        prev:{...entry},
+        entryChain,
+        lastChain:entryChain,
+        events:[],
+        action:null
+      };
 
-  if(u.pathname==='/api/job/action'&&req.method==='POST'){
-    const b=await body(req),j=liveJobs.get(String(b.id||''));
-    if(!j)return json(res,404,{error:'active job not found'});
-    if(j.playerId!==String(b.playerId||''))return json(res,403,{error:'not your job'});
-    if(j.action)return json(res,409,{error:'move already used'});
-    const allowed={ginu:'call_shot',ricky:'press_move',tony:'bring_bag',bruno:'lock_block',vinny:'tap_wire',paulie:'bail_now'};
-    const action=allowed[j.crew];
-    if(!action)return json(res,400,{error:'no move available'});
-    if(action==='bail_now'){
-      try{const x=await token(j.address);if(x)j.last=x}catch(e){}
-      j.action='bail_now';
-      addEvent(j,'move','Paulie bailed early','Paper Hand Paulie ended the job before the clock.');
-      settleJob(j);
-      return json(res,200,publicJob(completed.find(x=>x.id===j.id)||j))
-    }
-    j.action=action;
-    const labels={call_shot:'The Don made the call',press_move:'Ricky pressed the move',bring_bag:'Big Tony brought the bag',lock_block:'Bruno locked down the block',tap_wire:'Vinny tapped the wire'};
-    addEvent(j,'move',labels[action],'Special move armed for settlement.');
-    return json(res,200,publicJob(j))
-  }
-
-  if(u.pathname==='/api/token'&&req.method==='GET'){
-    const address=(u.searchParams.get('address')||'').trim();
-    if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address))return json(res,400,{error:'invalid token'});
-    const data=await token(address);return data?json(res,200,{token:data}):json(res,404,{error:'token not found'})
-  }
-
-  let rel=decodeURIComponent(u.pathname).replace(/^\/+/,'');
-  if(!rel||rel.endsWith('/'))rel+='index.html';
-  const file=path.normalize(path.join(root,rel));
-  if(!file.startsWith(root)){res.writeHead(403);return res.end('Forbidden')}
-  fs.stat(file,(err,stat)=>{
-    if(err||!stat.isFile()){const fb=path.join(root,'index.html');return fs.readFile(fb,(e,d)=>{if(e){res.writeHead(404);return res.end('Not found')}res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-cache'});res.end(d)})}
-    fs.readFile(file,(e,d)=>{if(e){res.writeHead(500);return res.end('Error')}const ext=path.extname(file).toLowerCase();res.writeHead(200,{'content-type':types[ext]||'application/octet-stream','cache-control':ext==='.html'?'no-cache':'public,max-age=31536000,immutable'});res.end(d)})
-  })
-}catch(e){console.error('request failed',req.method,req.url,e&&e.stack?e.stack:e);json(res,500,{error:'server error'})}});
-
-server.listen(port,'0.0.0.0',()=>console.log('Gangster Inu listening on '+port+' | Helius '+(HELIUS_KEY?'configured':'not configured')));+j.symbol);
+      addEvent(j,'start','Job locked',j.alias+' sent '+j.crew+' after $'+j.symbol);
       if(entryChain.sig2m>0)addEvent(j,'chain','Helius street tape',entryChain.sig2m+' pair-account signatures already active');
       liveJobs.set(id,j);
       return json(res,201,publicJob(j));
@@ -344,40 +340,78 @@ server.listen(port,'0.0.0.0',()=>console.log('Gangster Inu listening on '+port+'
   }
 
   if(u.pathname==='/api/job/action'&&req.method==='POST'){
-    const b=await body(req),j=liveJobs.get(String(b.id||''));
-    if(!j)return json(res,404,{error:'active job not found'});
-    if(j.playerId!==String(b.playerId||''))return json(res,403,{error:'not your job'});
-    if(j.action)return json(res,409,{error:'move already used'});
-    const allowed={ginu:'call_shot',ricky:'press_move',tony:'bring_bag',bruno:'lock_block',vinny:'tap_wire',paulie:'bail_now'};
-    const action=allowed[j.crew];
-    if(!action)return json(res,400,{error:'no move available'});
-    if(action==='bail_now'){
-      try{const x=await token(j.address);if(x)j.last=x}catch(e){}
-      j.action='bail_now';
-      addEvent(j,'move','Paulie bailed early','Paper Hand Paulie ended the job before the clock.');
-      settleJob(j);
-      return json(res,200,publicJob(completed.find(x=>x.id===j.id)||j))
+    try{
+      const b=await body(req);
+      const j=liveJobs.get(String(b.id||''));
+      if(!j)return json(res,404,{error:'active job not found'});
+      if(j.playerId!==String(b.playerId||''))return json(res,403,{error:'not your job'});
+      if(j.action)return json(res,409,{error:'move already used'});
+
+      const allowed={ginu:'call_shot',ricky:'press_move',tony:'bring_bag',bruno:'lock_block',vinny:'tap_wire',paulie:'bail_now'};
+      const action=allowed[j.crew];
+      if(!action)return json(res,400,{error:'no move available'});
+
+      if(action==='bail_now'){
+        try{
+          const x=await token(j.address);
+          if(x)j.last=x;
+        }catch(e){}
+        j.action='bail_now';
+        addEvent(j,'move','Paulie bailed early','Paper Hand Paulie ended the job before the clock.');
+        settleJob(j);
+        return json(res,200,publicJob(completed.find(x=>x.id===j.id)||j));
+      }
+
+      j.action=action;
+      const labels={
+        call_shot:'The Don made the call',
+        press_move:'Ricky pressed the move',
+        bring_bag:'Big Tony brought the bag',
+        lock_block:'Bruno locked down the block',
+        tap_wire:'Vinny tapped the wire'
+      };
+      addEvent(j,'move',labels[action],'Special move armed for settlement.');
+      return json(res,200,publicJob(j));
+    }catch(e){
+      console.error('POST /api/job/action failed',e&&e.stack?e.stack:e);
+      return json(res,500,{error:'Could not use crew move.'});
     }
-    j.action=action;
-    const labels={call_shot:'The Don made the call',press_move:'Ricky pressed the move',bring_bag:'Big Tony brought the bag',lock_block:'Bruno locked down the block',tap_wire:'Vinny tapped the wire'};
-    addEvent(j,'move',labels[action],'Special move armed for settlement.');
-    return json(res,200,publicJob(j))
   }
 
   if(u.pathname==='/api/token'&&req.method==='GET'){
     const address=(u.searchParams.get('address')||'').trim();
     if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address))return json(res,400,{error:'invalid token'});
-    const data=await token(address);return data?json(res,200,{token:data}):json(res,404,{error:'token not found'})
+    const data=await token(address);
+    return data?json(res,200,{token:data}):json(res,404,{error:'token not found'});
   }
 
-  let rel=decodeURIComponent(u.pathname).replace(/^\/+/,'');
+  let rel=decodeURIComponent(u.pathname).replace(/^\/+/, '');
   if(!rel||rel.endsWith('/'))rel+='index.html';
   const file=path.normalize(path.join(root,rel));
   if(!file.startsWith(root)){res.writeHead(403);return res.end('Forbidden')}
+
   fs.stat(file,(err,stat)=>{
-    if(err||!stat.isFile()){const fb=path.join(root,'index.html');return fs.readFile(fb,(e,d)=>{if(e){res.writeHead(404);return res.end('Not found')}res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-cache'});res.end(d)})}
-    fs.readFile(file,(e,d)=>{if(e){res.writeHead(500);return res.end('Error')}const ext=path.extname(file).toLowerCase();res.writeHead(200,{'content-type':types[ext]||'application/octet-stream','cache-control':ext==='.html'?'no-cache':'public,max-age=31536000,immutable'});res.end(d)})
-  })
-}catch(e){json(res,500,{error:'server error'})}});
+    if(err||!stat.isFile()){
+      const fb=path.join(root,'index.html');
+      return fs.readFile(fb,(e,d)=>{
+        if(e){res.writeHead(404);return res.end('Not found')}
+        res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-cache'});
+        res.end(d);
+      });
+    }
+    fs.readFile(file,(e,d)=>{
+      if(e){res.writeHead(500);return res.end('Error')}
+      const ext=path.extname(file).toLowerCase();
+      res.writeHead(200,{
+        'content-type':types[ext]||'application/octet-stream',
+        'cache-control':ext==='.html'?'no-cache':'public,max-age=31536000,immutable'
+      });
+      res.end(d);
+    });
+  });
+}catch(e){
+  console.error('request failed',req.method,req.url,e&&e.stack?e.stack:e);
+  json(res,500,{error:'server error'});
+}});
 
 server.listen(port,'0.0.0.0',()=>console.log('Gangster Inu listening on '+port+' | Helius '+(HELIUS_KEY?'configured':'not configured')));

@@ -35,9 +35,14 @@ function goWars(){document.querySelector('#wars').scrollIntoView();setTimeout(()
 function copyCA(){navigator.clipboard?.writeText($('ca').textContent);flash('CA copied')}
 function validMint(v){return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(v||'').trim())}
 function buyGINU(){const mint=$('ca').textContent.trim();if(!validMint(mint)){flash('$GINU CA has not been published yet.');return}window.open('https://pump.fun/coin/'+encodeURIComponent(mint),'_blank','noopener')}
-function shareText(text){window.open('https://twitter.com/intent/tweet?text='+encodeURIComponent(text+' '+location.origin),'_blank','noopener')}
+const PUBLIC_URL='https://gangsterinu.xyz';
+function shareText(text){window.open('https://twitter.com/intent/tweet?text='+encodeURIComponent(text+' '+PUBLIC_URL),'_blank','noopener')}
 function shareCard(){shareText('I am '+rank(GAME.respect)+' '+GAME.alias+' in the Gangster Inu Family. '+Math.round(GAME.respect)+' Respect · '+GAME.wins+' wins · '+GAME.jobs+' jobs. #GangsterInu #GINU')}
-async function shareJob(id){try{const r=await fetch('/api/job?id='+encodeURIComponent(id));const j=await r.json();const o=j.result||{};shareText((o.success?'Family job complete. ':'Family job went sideways. ')+'I sent '+(crew[j.crew]?.name||j.crew)+' after $'+j.symbol+' in Gangster Inu Family Wars. '+(o.points>=0?'+':'')+(o.points||0)+' Respect. #GangsterInu #GINU')}catch(e){shareText('I just finished a Family Wars job in Gangster Inu. #GangsterInu #GINU')}}
+function shareJobResult(j){
+  if(!j||!j.result){flash('Job result is not ready to share.');return}
+  const o=j.result,c=crew[j.crew]||{name:j.crew||'the Family'};
+  shareText((o.success?'Family job complete. ':'Family job went sideways. ')+'I sent '+c.name+' after $'+(j.symbol||'?')+' in Gangster Inu Family Wars. '+(o.points>=0?'+':'')+o.points+' Respect. #GangsterInu #GINU');
+}
 
 function renderMode(){
   $('modeHelp').innerHTML='<b style="color:var(--gold)">'+modes[mode].name+':</b> '+modes[mode].help+' <span style="color:#716957">Objective: '+modes[mode].objective+'</span>';
@@ -59,7 +64,7 @@ async function loadJobs(force=false){
     const d=await r.json();
     intel=(d.pairs||[]).filter(x=>x.priceUsd).slice(0,10);
     $('feedStatus').textContent=intel.length?'LIVE':'QUIET';
-    $('feedNote').textContent='Updated '+new Date(d.updatedAt||Date.now()).toLocaleTimeString()+' · DexScreener market data'+(d.heliusConfigured?' · Helius verification active':'');
+    const newest=d.newestLaunchAt?age(d.newestLaunchAt):'unknown'; $('feedNote').textContent='LIVE PUMP.FUN LAUNCH FEED · refreshed '+new Date(d.updatedAt||Date.now()).toLocaleTimeString()+' · newest playable launch '+newest+' ago'+(d.heliusConfigured?' · Helius verified':'');
     renderJobs();
   }catch(e){
     $('feedStatus').textContent='OFFLINE';
@@ -67,21 +72,28 @@ async function loadJobs(force=false){
   }
 }
 
-function modeSort(a,b){
-  if(mode==='bigmoney')return b.liquidityUsd-a.liquidityUsd;
-  if(mode==='wire')return (b.buys5m+b.sells5m)-(a.buys5m+a.sells5m);
-  if(mode==='collections')return Math.abs(a.change5m)-Math.abs(b.change5m);
-  return b.change5m-a.change5m;
+function modeRows(){
+  const now=Date.now();
+  const fresh=intel.filter(x=>!x.launchCreatedAt||now-x.launchCreatedAt<6*60*60*1000);
+  const pool=fresh.length>=4?fresh:intel;
+  if(mode==='street')return [...pool].sort((a,b)=>(b.launchCreatedAt||0)-(a.launchCreatedAt||0));
+  if(mode==='wire')return [...pool].sort((a,b)=>((b.buys5m+b.sells5m)-(a.buys5m+a.sells5m)));
+  if(mode==='collections'){
+    const pressure=pool.filter(x=>x.change5m<0);
+    return (pressure.length>=3?pressure:[...pool]).sort((a,b)=>a.change5m-b.change5m);
+  }
+  if(mode==='bigmoney')return [...pool].sort((a,b)=>b.liquidityUsd-a.liquidityUsd);
+  return pool;
 }
 
 function renderJobs(){
   if(!intel.length){$('jobs').innerHTML='<div class="empty">No live jobs returned yet. Try Refresh Board.</div>';return}
-  const rows=[...intel].sort(modeSort).slice(0,8);
+  const rows=modeRows().slice(0,8);
   $('jobs').innerHTML=rows.map(x=>
     '<article class="job-card '+(selected&&selected.address===x.address?'selected':'')+'" data-address="'+esc(x.address)+'">'+
       '<div class="job-top"><div class="job-token"><strong>$'+esc(x.symbol)+'</strong><small>'+esc(x.name)+'</small></div><span class="heat">HEAT '+Math.min(99,Math.round(25+Math.abs(x.change5m)*2+(x.buys5m+x.sells5m)/8))+'</span></div>'+
       '<div class="job-metrics"><div class="jm"><b class="'+(x.change5m>=0?'up':'down')+'">'+Number(x.change5m).toFixed(1)+'%</b><small>5m move</small></div><div class="jm"><b>'+money(x.volume5m)+'</b><small>5m volume</small></div><div class="jm"><b>'+money(x.liquidityUsd)+'</b><small>liquidity</small></div></div>'+
-      '<div class="badges">'+(x.heliusVerified?'<span class="badge ok">Helius verified</span>':'')+'<span class="badge">'+esc(x.dexId)+'</span><span class="badge">'+age(x.pairCreatedAt)+' old</span></div>'+
+      '<div class="badges"><span class="badge ok">PUMP.FUN</span>'+(x.heliusVerified?'<span class="badge ok">Helius verified</span>':'')+'<span class="badge">LAUNCHED '+age(x.launchCreatedAt||x.pairCreatedAt)+' AGO</span><span class="badge">'+esc(x.dexId)+'</span></div>'+
       '<div class="select-cue"><span>'+(selected&&selected.address===x.address?'JOB SELECTED':'SELECT THIS JOB')+'</span><span>→</span></div>'+
     '</article>'
   ).join('');
@@ -207,7 +219,7 @@ function settleLocal(j){
     (o.actionNote?'<div class="watching"><b>CREW MOVE</b><br>'+esc(o.actionNote)+(o.actionBonus?' · '+(o.actionBonus>0?'+':'')+o.actionBonus+' Respect':'')+'</div>':'')+
     '<button class="btn" id="anotherJobBtn">Take Another Job</button><button class="share-x" id="shareJobBtn">Share This Job to X</button></div>';
   $('anotherJobBtn').onclick=nextJob;
-  $('shareJobBtn').onclick=()=>shareJob(j.id);
+  $('shareJobBtn').onclick=()=>shareJobResult(j);
   loadWarBoard();
 }
 

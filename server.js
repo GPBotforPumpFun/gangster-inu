@@ -19,7 +19,44 @@ function normalize(p){return{symbol:p.baseToken?.symbol||'?',name:p.baseToken?.n
 async function dex(url){const r=await fetch(url,{headers});if(!r.ok)throw new Error('DexScreener '+r.status);return r.json()}
 async function helius(method,params){if(!HELIUS_KEY)throw new Error('not configured');const r=await fetch('https://mainnet.helius-rpc.com/?api-key='+encodeURIComponent(HELIUS_KEY),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:'ginu',method,params})});if(!r.ok)throw new Error('Helius '+r.status);const j=await r.json();if(j.error)throw new Error(j.error.message||'Helius error');return j.result}
 async function verify(items){if(!HELIUS_KEY||!items.length)return items;try{const a=await helius('getAssetBatch',{ids:items.map(x=>x.address)});const valid=new Set((a||[]).filter(Boolean).map(x=>x.id));return items.map(x=>({...x,heliusVerified:valid.has(x.address)}))}catch(e){return items}}
-async function intel(){if(intelCache.data&&Date.now()-intelCache.time<20000)return intelCache.data;let j=await dex('https://api.dexscreener.com/latest/dex/search?q=pump.fun');let pairs=(j.pairs||[]).filter(p=>p.chainId==='solana');if(pairs.length<10){j=await dex('https://api.dexscreener.com/latest/dex/search?q=solana');pairs.push(...(j.pairs||[]).filter(p=>p.chainId==='solana'))}const seen=new Set(),out=[];for(const p of pairs){const a=p.baseToken?.address;if(!a||seen.has(a)||!n(p.priceUsd))continue;seen.add(a);out.push(normalize(p))}out.sort((a,b)=>(b.volume5m+b.volume1h*.15)-(a.volume5m+a.volume1h*.15));const top=await verify(out.slice(0,24));intelCache={time:Date.now(),data:{source:'DexScreener + Helius',heliusConfigured:!!HELIUS_KEY,updatedAt:Date.now(),pairs:top}};return intelCache.data}
+async function intel(){
+  if(intelCache.data&&Date.now()-intelCache.time<20000)return intelCache.data;
+  const addresses=[];
+  try{
+    const [profiles,boosts]=await Promise.all([
+      dex('https://api.dexscreener.com/token-profiles/latest/v1').catch(()=>[]),
+      dex('https://api.dexscreener.com/token-boosts/latest/v1').catch(()=>[])
+    ]);
+    for(const x of [...(Array.isArray(profiles)?profiles:[]),...(Array.isArray(boosts)?boosts:[])]){
+      if(x.chainId==='solana'&&x.tokenAddress&&!addresses.includes(x.tokenAddress))addresses.push(x.tokenAddress);
+      if(addresses.length>=28)break;
+    }
+  }catch(e){}
+  let pairs=[];
+  const batches=addresses.slice(0,24);
+  if(batches.length){
+    const found=await Promise.all(batches.map(a=>dex('https://api.dexscreener.com/token-pairs/v1/solana/'+encodeURIComponent(a)).catch(()=>[])));
+    for(const arr of found)if(Array.isArray(arr))pairs.push(...arr);
+  }
+  if(pairs.length<8){
+    const searches=await Promise.all(['pump','pumpfun','solana meme'].map(q=>dex('https://api.dexscreener.com/latest/dex/search?q='+encodeURIComponent(q)).catch(()=>({pairs:[]}))));
+    for(const j of searches)pairs.push(...(j.pairs||[]));
+  }
+  const seen=new Set(),out=[];
+  for(const p of pairs){
+    if(p.chainId!=='solana')continue;
+    const a=p.baseToken?.address;
+    if(!a||seen.has(a)||!n(p.priceUsd)||n(p.liquidity?.usd)<1000)continue;
+    seen.add(a);
+    const x=normalize(p);
+    x.pumpOrigin=/pump/i.test(p.dexId||'')||/pump$/i.test(a)||/pump/i.test(p.url||'');
+    out.push(x);
+  }
+  out.sort((a,b)=>(Number(b.pumpOrigin)-Number(a.pumpOrigin))+((b.volume5m+b.volume1h*.12)-(a.volume5m+a.volume1h*.12))/1000000);
+  const top=await verify(out.slice(0,24));
+  intelCache={time:Date.now(),data:{source:'DexScreener + Helius',heliusConfigured:!!HELIUS_KEY,updatedAt:Date.now(),pairs:top}};
+  return intelCache.data
+}
 async function token(address){const j=await dex('https://api.dexscreener.com/token-pairs/v1/solana/'+encodeURIComponent(address));const pairs=(Array.isArray(j)?j:[]).filter(p=>p.chainId==='solana'&&n(p.priceUsd));if(!pairs.length)return null;pairs.sort((a,b)=>n(b.liquidity?.usd)-n(a.liquidity?.usd));const x=normalize(pairs[0]);if(HELIUS_KEY){try{const a=await helius('getAsset',{id:address});x.heliusVerified=!!a}catch(e){}}return x}
 function outcome(j,x){const e=j.entry,pct=e.priceUsd?((x.priceUsd-e.priceUsd)/e.priceUsd*100):0,liq=e.liquidityUsd?((x.liquidityUsd-e.liquidityUsd)/e.liquidityUsd*100):0,act0=(e.buys5m||0)+(e.sells5m||0),act1=(x.buys5m||0)+(x.sells5m||0),act=act1-act0;let success=false,base=0;if(j.mode==='street'){success=pct>0;base=70+pct*12}if(j.mode==='wire'){success=act>=0&&x.priceUsd>0;base=70+Math.max(0,act)*4+Math.max(-20,pct*3)}if(j.mode==='collections'){success=pct>-3;base=85+(pct+3)*7}if(j.mode==='bigmoney'){success=liq>0;base=80+liq*8}let mult=1;if(j.crew==='ginu'&&success)mult=1.2;if(j.crew==='ricky'&&pct>=5)mult=1.7;if(j.crew==='tony'&&liq>=2)mult=1.7;if(j.crew==='bruno'&&pct>-3)mult=1.65;if(j.crew==='vinny'&&act>0)mult=1.65;if(j.crew==='paulie')mult=pct>=10?2.5:(success?1.05:.55);const points=Math.round(Math.max(success?25:-120,success?base*mult:-55-Math.min(65,Math.abs(pct)*4)));return{success,points,pct,liq,act,mult}}
 function publicJob(j){return{id:j.id,playerId:j.playerId,alias:j.alias,symbol:j.symbol,name:j.name,address:j.address,crew:j.crew,mode:j.mode,start:j.start,end:j.end,status:j.status,entry:j.entry,last:j.last,result:j.result||null}}

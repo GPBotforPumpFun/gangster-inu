@@ -8,6 +8,7 @@ const port=process.env.PORT||3000;
 const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8','.webp':'image/webp','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.svg':'image/svg+xml','.json':'application/json; charset=utf-8'};
 const headers={accept:'application/json','user-agent':'GangsterInu/5.0'};
 const HELIUS_KEY=process.env.HELIUS_API_KEY||'';
+const PUMP_PROGRAM='6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 const JOB_MS=90000;
 let intelCache={time:0,data:null};
 const liveJobs=new Map();
@@ -26,66 +27,90 @@ async function pumpLatest(){
   return Array.isArray(j)?j:(Array.isArray(j.coins)?j.coins:(Array.isArray(j.data)?j.data:[]));
 }
 async function helius(method,params){if(!HELIUS_KEY)throw new Error('not configured');const r=await fetch('https://mainnet.helius-rpc.com/?api-key='+encodeURIComponent(HELIUS_KEY),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:'ginu',method,params})});if(!r.ok)throw new Error('Helius '+r.status);const j=await r.json();if(j.error)throw new Error(j.error.message||'Helius error');return j.result}
-async function verify(items){if(!HELIUS_KEY||!items.length)return items;try{const a=await helius('getAssetBatch',{ids:items.map(x=>x.address)});const valid=new Set((a||[]).filter(Boolean).map(x=>x.id));return items.map(x=>({...x,heliusVerified:valid.has(x.address)}))}catch(e){return items}}
+async function verify(items){
+  if(!HELIUS_KEY||!items.length)return items;
+  try{
+    const assets=await helius('getAssetBatch',{ids:items.map(x=>x.address)});
+    const map=new Map((assets||[]).filter(Boolean).map(a=>[a.id,a]));
+    return items.map(x=>{
+      const a=map.get(x.address),m=a?.content?.metadata||{};
+      return {...x,heliusVerified:!!a,name:m.name||x.name,symbol:m.symbol||x.symbol};
+    });
+  }catch(e){return items}
+}
+async function solUsd(){
+  try{
+    const j=await dex('https://api.dexscreener.com/latest/dex/search?q=SOL%20USDC');
+    const p=(j.pairs||[]).filter(x=>x.chainId==='solana'&&x.baseToken?.symbol==='SOL'&&['USDC','USDT'].includes(x.quoteToken?.symbol)).sort((a,b)=>n(b.liquidity?.usd)-n(a.liquidity?.usd))[0];
+    return n(p?.priceUsd)||0;
+  }catch(e){return 0}
+}
+function readU64(buf,off){if(buf.length<off+8)return 0;return Number(buf.readBigUInt64LE(off))}
+async function curveSnapshot(curve,usd){
+  try{
+    const info=await helius('getAccountInfo',[curve,{encoding:'base64',commitment:'confirmed'}]);
+    const b64=info?.value?.data?.[0];if(!b64)return null;
+    const buf=Buffer.from(b64,'base64');if(buf.length<49)return null;
+    const vt=readU64(buf,8),vs=readU64(buf,16),rt=readU64(buf,24),rs=readU64(buf,32),supply=readU64(buf,40),complete=!!buf[48];
+    const priceSol=vt>0?(vs/1e9)/(vt/1e6):0;
+    const priceUsd=priceSol*usd;
+    return{virtualTokenReserves:vt,virtualSolReserves:vs,realTokenReserves:rt,realSolReserves:rs,totalSupply:supply,complete,priceUsd,marketCap:priceUsd*(supply/1e6),curveLiquidityUsd:(rs/1e9)*usd};
+  }catch(e){return null}
+}
+async function latestPumpLaunches(){
+  if(!HELIUS_KEY)return[];
+  const sigs=await helius('getSignaturesForAddress',[PUMP_PROGRAM,{limit:80,commitment:'confirmed'}]).catch(()=>[]);
+  const txs=await Promise.all((sigs||[]).slice(0,55).map(x=>helius('getTransaction',[x.signature,{encoding:'jsonParsed',maxSupportedTransactionVersion:0,commitment:'confirmed'}]).catch(()=>null)));
+  const launches=[];
+  for(let k=0;k<txs.length;k++){
+    const tx=txs[k];if(!tx?.transaction?.message)continue;
+    const logs=tx.meta?.logMessages||[];
+    if(!logs.some(v=>/Instruction: Create(?:V2)?\b/i.test(v)))continue;
+    const ins=(tx.transaction.message.instructions||[]).find(i=>i.programId===PUMP_PROGRAM&&Array.isArray(i.accounts)&&i.accounts.length>=3);
+    if(!ins)continue;
+    const mint=String(ins.accounts[0]),curve=String(ins.accounts[2]);
+    if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint))continue;
+    launches.push({address:mint,bondingCurve:curve,launchCreatedAt:(tx.blockTime||sigs[k]?.blockTime||0)*1000,signature:sigs[k]?.signature||'',pumpOrigin:true});
+    if(launches.length>=24)break;
+  }
+  return launches;
+}
 async function chainPulse(pairAddress){if(!HELIUS_KEY||!pairAddress)return{configured:!!HELIUS_KEY,sig2m:0,sig5m:0,latest:null};try{const sigs=await helius('getSignaturesForAddress',[pairAddress,{limit:40}]);const now=Math.floor(Date.now()/1000),rows=(sigs||[]).filter(x=>x.blockTime);return{configured:true,sig2m:rows.filter(x=>now-x.blockTime<=120).length,sig5m:rows.filter(x=>now-x.blockTime<=300).length,latest:rows[0]?.blockTime||null}}catch(e){return{configured:true,sig2m:0,sig5m:0,latest:null,error:true}}}
 
 async function intel(){
   if(intelCache.data&&Date.now()-intelCache.time<10000)return intelCache.data;
-  let launchRows=[],source='Pump.fun newest launches';
-  try{launchRows=await pumpLatest()}catch(e){source='DexScreener fallback'}
-  const launchMap=new Map();
-  const mints=[];
-  for(const c of launchRows){
-    const mint=String(c.mint||c.address||'');
-    if(!mint||launchMap.has(mint))continue;
-    const created=Number(c.created_timestamp||c.createdAt||0);
-    launchMap.set(mint,{
-      launchCreatedAt:created,
-      lastTradeAt:Number(c.last_trade_timestamp||0),
-      pumpComplete:!!c.complete,
-      pumpMarketCap:n(c.usd_market_cap||c.market_cap||0),
-      pumpName:c.name||'',
-      pumpSymbol:c.symbol||''
+  const usd=await solUsd();
+  let launches=[];
+  try{launches=await latestPumpLaunches()}catch(e){}
+  const rows=[];
+  for(const l of launches){
+    const [curve,pairs,sigs]=await Promise.all([
+      curveSnapshot(l.bondingCurve,usd),
+      dex('https://api.dexscreener.com/token-pairs/v1/solana/'+encodeURIComponent(l.address)).catch(()=>[]),
+      helius('getSignaturesForAddress',[l.bondingCurve,{limit:30,commitment:'confirmed'}]).catch(()=>[])
+    ]);
+    const best=(Array.isArray(pairs)?pairs:[]).filter(p=>p.chainId==='solana'&&n(p.priceUsd)).sort((a,b)=>n(b.liquidity?.usd)-n(a.liquidity?.usd))[0];
+    let x=best?normalize(best):{
+      symbol:'?',name:'New Pump Launch',address:l.address,pairAddress:l.bondingCurve,quote:'SOL',
+      priceUsd:n(curve?.priceUsd),change5m:0,change1h:0,liquidityUsd:n(curve?.curveLiquidityUsd),
+      volume5m:0,volume1h:0,buys5m:0,sells5m:0,buys1h:0,sells1h:0,pairCreatedAt:l.launchCreatedAt,
+      dexId:'pump.fun',url:'https://pump.fun/coin/'+l.address,heliusVerified:true
+    };
+    const now=Math.floor(Date.now()/1000),recent=(sigs||[]).filter(z=>z.blockTime);
+    Object.assign(x,l,{
+      pumpOrigin:true,
+      pumpComplete:!!curve?.complete,
+      pumpMarketCap:n(curve?.marketCap)||n(x.marketCap),
+      chainActivity2m:recent.filter(z=>now-z.blockTime<=120).length,
+      chainActivity5m:recent.filter(z=>now-z.blockTime<=300).length,
+      sourceType:best?'dex':'bonding-curve'
     });
-    mints.push(mint);
-    if(mints.length>=36)break;
+    rows.push(x);
   }
-
-  let pairs=[];
-  if(mints.length){
-    const found=await Promise.all(mints.map(m=>dex('https://api.dexscreener.com/token-pairs/v1/solana/'+encodeURIComponent(m)).catch(()=>[])));
-    for(const arr of found)if(Array.isArray(arr))pairs.push(...arr);
-  }
-
-  if(!pairs.length){
-    const searches=await Promise.all(['pump','pumpfun'].map(q=>dex('https://api.dexscreener.com/latest/dex/search?q='+encodeURIComponent(q)).catch(()=>({pairs:[]}))));
-    for(const j of searches)pairs.push(...(j.pairs||[]));
-  }
-
-  const byMint=new Map();
-  for(const p of pairs){
-    if(p.chainId!=='solana')continue;
-    const mint=p.baseToken?.address;
-    if(!mint||!n(p.priceUsd))continue;
-    const current=byMint.get(mint);
-    if(!current||n(p.liquidity?.usd)>n(current.liquidity?.usd))byMint.set(mint,p);
-  }
-
-  const out=[];
-  for(const [mint,p] of byMint){
-    const x=normalize(p);
-    const launch=launchMap.get(mint)||{};
-    Object.assign(x,launch);
-    x.pumpOrigin=launchMap.has(mint)||/pump/i.test(p.dexId||'')||/pump$/i.test(mint)||/pump/i.test(p.url||'');
-    if(!x.launchCreatedAt)x.launchCreatedAt=x.pairCreatedAt||0;
-    if(n(x.liquidityUsd)<500)continue;
-    out.push(x);
-  }
-
-  out.sort((a,b)=>(b.launchCreatedAt||0)-(a.launchCreatedAt||0));
-  const top=await verify(out.slice(0,30));
+  let top=await verify(rows);
+  top.sort((a,b)=>(b.launchCreatedAt||0)-(a.launchCreatedAt||0));
   intelCache={time:Date.now(),data:{
-    source:source+' + DexScreener + Helius',
+    source:'Helius Pump.fun program + bonding curve + DexScreener',
     heliusConfigured:!!HELIUS_KEY,
     updatedAt:Date.now(),
     newestLaunchAt:top[0]?.launchCreatedAt||null,
@@ -94,15 +119,23 @@ async function intel(){
   return intelCache.data
 }
 async function token(address){
-  const j=await dex('https://api.dexscreener.com/token-pairs/v1/solana/'+encodeURIComponent(address));
+  const j=await dex('https://api.dexscreener.com/token-pairs/v1/solana/'+encodeURIComponent(address)).catch(()=>[]);
   const pairs=(Array.isArray(j)?j:[]).filter(p=>p.chainId==='solana'&&n(p.priceUsd));
-  if(!pairs.length)return null;
-  pairs.sort((a,b)=>n(b.liquidity?.usd)-n(a.liquidity?.usd));
-  const x=normalize(pairs[0]);
-  if(HELIUS_KEY){try{const a=await helius('getAsset',{id:address});x.heliusVerified=!!a}catch(e){}}
-  return x
+  if(pairs.length){
+    pairs.sort((a,b)=>n(b.liquidity?.usd)-n(a.liquidity?.usd));
+    const x=normalize(pairs[0]);
+    if(HELIUS_KEY){try{const a=await helius('getAsset',{id:address});x.heliusVerified=!!a}catch(e){}}
+    return x;
+  }
+  const feed=await intel().catch(()=>({pairs:[]}));
+  const row=(feed.pairs||[]).find(x=>x.address===address);
+  if(!row?.bondingCurve)return null;
+  const snap=await curveSnapshot(row.bondingCurve,await solUsd());
+  if(!snap)return null;
+  const sigs=await helius('getSignaturesForAddress',[row.bondingCurve,{limit:30,commitment:'confirmed'}]).catch(()=>[]);
+  const now=Math.floor(Date.now()/1000),recent=(sigs||[]).filter(z=>z.blockTime);
+  return {...row,priceUsd:n(snap.priceUsd),liquidityUsd:n(snap.curveLiquidityUsd),pumpMarketCap:n(snap.marketCap),pumpComplete:!!snap.complete,chainActivity2m:recent.filter(z=>now-z.blockTime<=120).length,chainActivity5m:recent.filter(z=>now-z.blockTime<=300).length};
 }
-
 function addEvent(j,type,label,detail){
   const now=Date.now();
   const last=j.events[j.events.length-1];

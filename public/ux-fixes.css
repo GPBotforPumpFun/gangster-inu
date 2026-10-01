@@ -1,0 +1,18 @@
+/* Gangster Inu UX refinements */
+.family-grid{grid-template-columns:repeat(3,1fr)!important}
+.family-card.boss{grid-row:auto!important;min-height:445px!important}
+.boss .family-art{height:305px!important}
+.boss h3{font-size:28px!important}
+.play-steps{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:0 0 24px}
+.play-step{position:relative;border:1px solid var(--line);background:#0b0907;padding:15px 16px 15px 48px;min-height:72px}
+.play-step b{display:block;font:11px Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase;color:var(--paper);margin-bottom:4px}
+.play-step small{display:block;color:#817865;font-size:11px;line-height:1.35}
+.step-num{position:absolute;left:14px;top:16px;width:25px;height:25px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--gold);color:var(--gold);font:bold 10px Arial}
+.select-cue{display:inline-flex;align-items:center;gap:6px;margin-top:11px;color:var(--gold);font:bold 8px Arial;letter-spacing:.13em;text-transform:uppercase}
+.select-cue:after{content:'→';font-size:13px}
+.job-card.selected .select-cue{color:var(--green)}
+.desk-step{display:block;color:var(--gold);font:bold 9px Arial;letter-spacing:.14em;text-transform:uppercase;margin-bottom:8px}
+.desk-arrow{font-size:30px;color:#5e4a29;display:block;margin:8px 0}
+.feed-stamp{font-size:10px;margin:-8px 0 14px;color:var(--muted);letter-spacing:.04em}
+@media(max-width:1050px){.family-grid{grid-template-columns:repeat(2,1fr)!important}.family-card.boss{grid-column:auto!important}.boss .family-art{height:305px!important}}
+@media(max-width:650px){.play-steps{grid-template-columns:1fr}.play-step{min-height:62px}.family-grid{grid-template-columns:1fr!important}.family-art,.boss .family-art{height:360px!important}}

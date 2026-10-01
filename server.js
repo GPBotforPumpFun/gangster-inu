@@ -1,22 +1,9 @@
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const root = path.join(__dirname, 'public');
-const port = process.env.PORT || 3000;
-const types = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8','.webp':'image/webp','.png':'image/png','.svg':'image/svg+xml','.ico':'image/x-icon','.json':'application/json; charset=utf-8'};
-const server = http.createServer((req,res)=>{
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  if(url.pathname === '/health'){ res.writeHead(200, {'content-type':'application/json'}); return res.end(JSON.stringify({ok:true,app:'gangster-inu'})); }
-  let rel = decodeURIComponent(url.pathname).replace(/^\/+/, '');
-  if(!rel || rel.endsWith('/')) rel += 'index.html';
-  const file = path.normalize(path.join(root, rel));
-  if(!file.startsWith(root)){res.writeHead(403);return res.end('Forbidden');}
-  fs.stat(file,(err,stat)=>{
-    if(err || !stat.isFile()){
-      const fallback=path.join(root,'index.html');
-      return fs.readFile(fallback,(e,data)=>{ if(e){res.writeHead(404);return res.end('Not found');} res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-cache'}); res.end(data); });
-    }
-    fs.readFile(file,(e,data)=>{if(e){res.writeHead(500);return res.end('Error');} const ext=path.extname(file).toLowerCase(); res.writeHead(200,{'content-type':types[ext]||'application/octet-stream','cache-control':ext==='.html'?'no-cache':'public, max-age=31536000, immutable'});res.end(data);});
-  });
-});
-server.listen(port,'0.0.0.0',()=>console.log(`Gangster Inu listening on ${port}`));
+const http=require('http');const fs=require('fs');const path=require('path');const root=path.join(__dirname,'public');const port=process.env.PORT||3000;
+const types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8','.webp':'image/webp','.png':'image/png','.svg':'image/svg+xml','.json':'application/json; charset=utf-8'};
+let cache={time:0,data:null};
+async function intel(){if(cache.data&&Date.now()-cache.time<45000)return cache.data;let url='https://api.dexscreener.com/latest/dex/search?q=pump.fun';let r=await fetch(url,{headers:{accept:'application/json','user-agent':'GangsterInu/1.0'}});if(!r.ok)throw new Error('DexScreener '+r.status);let j=await r.json();let pairs=(j.pairs||[]).filter(p=>p.chainId==='solana');if(!pairs.length){r=await fetch('https://api.dexscreener.com/latest/dex/search?q=solana',{headers:{accept:'application/json','user-agent':'GangsterInu/1.0'}});j=await r.json();pairs=(j.pairs||[]).filter(p=>p.chainId==='solana')}
+const seen=new Set(),out=[];for(const p of pairs){const a=p.baseToken?.address;if(!a||seen.has(a))continue;seen.add(a);out.push({symbol:p.baseToken?.symbol||'',name:p.baseToken?.name||'',address:a,priceUsd:p.priceUsd||null,change24h:p.priceChange?.h24||0,liquidityUsd:p.liquidity?.usd||0,volume24h:p.volume?.h24||0,url:p.url||'',dexId:p.dexId||''});if(out.length>=18)break}cache={time:Date.now(),data:{source:'DexScreener',pairs:out}};return cache.data}
+const server=http.createServer(async(req,res)=>{try{const u=new URL(req.url,'http://'+(req.headers.host||'localhost'));if(u.pathname==='/health'){res.writeHead(200,{'content-type':'application/json'});return res.end(JSON.stringify({ok:true,app:'gangster-inu'}))}
+if(u.pathname==='/api/intel'){try{const data=await intel();res.writeHead(200,{'content-type':'application/json','cache-control':'public,max-age=30'});return res.end(JSON.stringify(data))}catch(e){res.writeHead(502,{'content-type':'application/json'});return res.end(JSON.stringify({error:'intel unavailable',pairs:[]}))}}
+let rel=decodeURIComponent(u.pathname).replace(/^\/+/,'');if(!rel||rel.endsWith('/'))rel+='index.html';const file=path.normalize(path.join(root,rel));if(!file.startsWith(root)){res.writeHead(403);return res.end('Forbidden')}fs.stat(file,(err,stat)=>{if(err||!stat.isFile()){const fb=path.join(root,'index.html');return fs.readFile(fb,(e,d)=>{if(e){res.writeHead(404);return res.end('Not found')}res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-cache'});res.end(d)})}fs.readFile(file,(e,d)=>{if(e){res.writeHead(500);return res.end('Error')}const ext=path.extname(file).toLowerCase();res.writeHead(200,{'content-type':types[ext]||'application/octet-stream','cache-control':ext==='.html'?'no-cache':'public,max-age=31536000,immutable'});res.end(d)})})}catch(e){res.writeHead(500);res.end('Server error')}});
+server.listen(port,'0.0.0.0',()=>console.log('Gangster Inu listening on '+port));
